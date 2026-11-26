@@ -44,4 +44,9 @@ var rejected = false
 do { _ = try ImportHistory.load(from: root) } catch { rejected = true }
 check(rejected, "surface damaged history instead of silently overwriting it")
 check(ImportStorage.month(nil) == "Без даты", "handle missing capture date")
+let firstConnection = USBDeviceIdentity(persistentID: "phone", uuid: nil, serial: nil, location: 1)
+check(firstConnection.matches(USBDeviceIdentity(persistentID: "phone", uuid: "new", serial: nil, location: 2)), "follow replacement driver object by persistent identity")
+check(firstConnection.matches(USBDeviceIdentity(persistentID: nil, uuid: nil, serial: nil, location: 1)), "replace placeholder using physical USB location")
+check(!firstConnection.matches(USBDeviceIdentity(persistentID: "other", uuid: nil, serial: nil, location: 2)), "keep separate connected phones separate")
+check(!USBDeviceIdentity(persistentID: nil, uuid: nil, serial: nil, location: 0).matches(USBDeviceIdentity(persistentID: nil, uuid: nil, serial: nil, location: 0)), "unknown identifiers never collapse unrelated devices")
 print("\(checks) checks passed")

@@ -19,6 +19,7 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
     @Published var items: [MediaItem] = []
     @Published var selected: Set<String> = []
     @Published var ready = false
+    @Published var connectionIssue = false
     @Published var busy = false
     @Published var deleting = false
     @Published var stopping = false
@@ -37,7 +38,11 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
     @Published var report = ""
     @Published var alert: String?
 
-    private let browser = ICDeviceBrowser()
+    private var browser = ICDeviceBrowser()
+    private var connectionStarted: Date?
+    private var catalogPolledAt = Date.distantPast
+    private var lastCatalogCount = -1
+    private var restartingBrowser = false
     private var history = ImportHistory()
     private var historyError: String?
     private var queue: [MediaItem] = []
@@ -60,13 +65,24 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
         browser.delegate = self
         browser.browsedDeviceTypeMask = ICDeviceTypeMask(rawValue: ICDeviceTypeMask.camera.rawValue | ICDeviceLocationTypeMask.local.rawValue)!
         timer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
-            guard let self, self.busy else { return }
+            guard let self else { return }
+            if !self.busy {
+                if Date().timeIntervalSince(self.catalogPolledAt) >= 1 {
+                    self.catalogPolledAt = Date()
+                    self.pollCatalog()
+                }
+                return
+            }
             let part = self.operationProgress?.fractionCompleted ?? 0
             self.fraction = self.deleting ? part : (Double(self.index) + part) / Double(max(1, self.queue.count))
         }
     }
 
-    func start() { browser.start() }
+    func start() { connectionStarted = Date(); browser.start() }
+    private static func identity(_ device: ICDevice) -> USBDeviceIdentity {
+        USBDeviceIdentity(persistentID: device.persistentIDString, uuid: device.uuidString,
+                          serial: device.serialNumberString, location: device.usbLocationID)
+    }
     var chosen: [MediaItem] { items.filter { selected.contains($0.id) } }
     var chosenBytes: Int64 { chosen.reduce(0) { $0 + $1.bytes } }
     var supportsDeletion: Bool { camera?.capabilities.contains(ICDeviceCapability.cameraDeviceCanDeleteOneFile.rawValue) == true }
@@ -94,29 +110,100 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
 
     func connect(_ device: ICCameraDevice) {
         guard !busy, camera !== device else { return }
-        camera?.requestCloseSession()
-        camera?.delegate = nil
+        closeCurrentSession()
         camera = device
-        items = []; selected = []; ready = false; knownImported = []
+        items = []; selected = []; ready = false; connectionIssue = false; knownImported = []
+        connectionStarted = Date(); lastCatalogCount = -1
         device.delegate = self
         status = "Подключение к \(Self.displayName(device))…"
         detail = "Разблокируйте iPhone и разрешите доступ к фото и видео."
-        device.requestOpenSession()
+        if device.hasOpenSession { pollCatalog() } else { device.requestOpenSession() }
     }
 
     func reconnect() {
         guard !busy else { return }
-        if let device = camera {
-            ready = false
-            status = "Повторное подключение…"
-            reconnectAfterClose = true
-            device.requestCloseSession()
-            // Reopen only from didCloseSession; opening while the session closes races the driver.
-        } else {
-            browser.stop(); browser.start()
+        if let camera, ready, camera.hasOpenSession, !camera.isAccessRestrictedAppleDevice {
+            catalogReady(camera)
+            return
+        }
+        // Reopening an obsolete ICCameraDevice cannot recover a dead driver endpoint.
+        // Discard its device references and restart discovery. A healthy session
+        // only needs its catalog refreshed, without tearing down a working driver.
+        closeCurrentSession()
+        camera = nil; devices = []; items = []; selected = []; knownImported = []
+        ready = false; connectionIssue = false; connectionStarted = Date()
+        status = "Повторный поиск iPhone…"
+        detail = "Ищем новое USB-соединение. Оставьте iPhone разблокированным."
+        restartingBrowser = true
+        browser.stop()
+        let replacement = browser
+        // stop() unregisters the previous driver asynchronously. Starting another
+        // browser in the same run-loop turn can have that registration removed too.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self, weak replacement] in
+            guard let self, let replacement, self.browser === replacement else { return }
+            self.restartingBrowser = false
+            replacement.delegate = self
+            replacement.start()
+            // Some drivers retain an already enumerated device across stop/start.
+            // Consume the current snapshot as well as future didAdd callbacks.
+            for device in replacement.devices ?? [] {
+                self.deviceBrowser(replacement, didAdd: device, moreComing: false)
+            }
         }
     }
-    private var reconnectAfterClose = false
+
+    private func closeCurrentSession() {
+        guard let previous = camera else { return }
+        // The block API does not depend on keeping the old device delegate alive
+        // until the driver's asynchronous close operation has completed.
+        if previous.hasOpenSession { previous.requestCloseSession(options: nil) { _ in } }
+        previous.delegate = nil
+    }
+
+    private func pollCatalog() {
+        guard !ready, !busy else { return }
+        guard let camera else {
+            if let started = connectionStarted, Date().timeIntervalSince(started) > 15 {
+                connectionStarted = nil; connectionIssue = true
+                status = "iPhone не найден"
+                detail = "Переподключите USB-кабель и нажмите «Обновить»."
+            }
+            return
+        }
+        if camera.isAccessRestrictedAppleDevice {
+            connectionIssue = true
+            status = "iPhone ограничил доступ к медиатеке"
+            detail = "На iPhone разрешите доступ к фото. После разрешения соединение продолжится автоматически."
+            return
+        }
+        if camera.hasOpenSession {
+            let count = camera.mediaFiles?.count ?? 0
+            if count != lastCatalogCount {
+                lastCatalogCount = count
+                snapshot()
+            }
+            let percent = camera.contentCatalogPercentCompleted
+            if percent == 100 { catalogReady(camera); return }
+            if !items.isEmpty {
+                connectionIssue = false
+                status = "Чтение медиатеки · найдено \(items.count) файлов"
+                detail = "\(percent)% · Файлы появятся по мере чтения списка."
+                return
+            }
+        }
+        if let started = connectionStarted, Date().timeIntervalSince(started) > 30 {
+            connectionIssue = true
+            status = "Не удалось получить список файлов"
+            detail = "Нажмите «Обновить» для нового поиска iPhone. При необходимости переподключите кабель."
+        }
+    }
+
+    private func catalogReady(_ device: ICCameraDevice) {
+        guard camera === device else { return }
+        snapshot(); ready = true; connectionIssue = false; connectionStarted = nil
+        status = items.isEmpty ? "На устройстве нет доступных файлов" : "iPhone подключён"
+        detail = "Доступно файлов: \(items.count) · \(Self.size(items.reduce(0) { $0 + $1.bytes }))"
+    }
 
     private func reloadHistory() {
         historyError = nil
@@ -148,7 +235,12 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
             }
             for sidecar in file.sidecarFiles ?? [] { if let sidecar = sidecar as? ICCameraFile { append(sidecar) } }
         }
-        for file in camera.mediaFiles ?? [] { if let file = file as? ICCameraFile { append(file) } }
+        func walk(_ item: ICCameraItem) {
+            if let file = item as? ICCameraFile { append(file) }
+            else if let folder = item as? ICCameraFolder { for child in folder.contents ?? [] { walk(child) } }
+        }
+        for item in camera.mediaFiles ?? [] { walk(item) }
+        if result.isEmpty { for item in camera.contents ?? [] { walk(item) } }
         items = result.sorted { ($0.date ?? .distantPast) == ($1.date ?? .distantPast) ? $0.name < $1.name : ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
         selected.formIntersection(Set(items.map(\.id)))
         reloadHistory()
@@ -312,35 +404,50 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
     static func size(_ bytes: Int64) -> String { bytes == 0 ? "0 Б" : ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
 
     func deviceBrowser(_ browser: ICDeviceBrowser, didAdd device: ICDevice, moreComing: Bool) {
-        guard let device = device as? ICCameraDevice, device.transportType == ICDeviceTransport.transportTypeUSB.rawValue else { return }
-        if !devices.contains(where: { $0 === device }) { devices.append(device) }
-        if camera == nil { connect(device) }
+        guard browser === self.browser, !restartingBrowser, let device = device as? ICCameraDevice,
+              device.transportType == ICDeviceTransport.transportTypeUSB.rawValue else { return }
+        let shouldFollow = camera.map { Self.identity($0).matches(Self.identity(device)) } ?? true
+        if let index = devices.firstIndex(where: { $0 === device || Self.identity($0).matches(Self.identity(device)) }) {
+            devices[index] = device
+        } else { devices.append(device) }
+        if shouldFollow && camera !== device {
+            if busy {
+                batchID = UUID(); busy = false; deleting = false; operationProgress = nil; endActivity()
+                report += "\nДрайвер заменил USB-соединение. Незавершённая операция остановлена.\n"
+            }
+            connect(device)
+        }
     }
-    func deviceBrowser(_ browser: ICDeviceBrowser, didRemove device: ICDevice, moreGoing: Bool) { didRemove(device) }
+    func deviceBrowser(_ browser: ICDeviceBrowser, didRemove device: ICDevice, moreGoing: Bool) {
+        guard browser === self.browser else { return }
+        didRemove(device)
+    }
     func didRemove(_ device: ICDevice) {
         devices.removeAll { $0 === device }
         guard camera === device else { return }
         batchID = UUID(); busy = false; deleting = false; operationProgress = nil; endActivity()
         camera = nil; items = []; selected = []; ready = false; knownImported = []
+        connectionIssue = false; connectionStarted = nil
         status = "iPhone отключён"
         detail = "Подключите кабель снова. Завершённые копии сохранены."
         report += "\nУстройство отключено. Незавершённый файл не засчитан.\n"
     }
     func device(_ device: ICDevice, didOpenSessionWithError error: Error?) {
         guard camera === device else { return }
-        if let error { status = "Не удалось подключиться"; detail = error.localizedDescription }
+        if let error { connectionIssue = true; status = "Не удалось подключиться"; detail = error.localizedDescription }
         else if camera?.isAccessRestrictedAppleDevice == true {
             status = "Разблокируйте iPhone"
             detail = "Подтвердите доверие к этому Mac и доступ к фото на экране телефона."
         } else {
             status = "Чтение списка файлов…"
             detail = "Большая медиатека может загружаться несколько минут. iPhone должен быть разблокирован."
+            pollCatalog()
         }
     }
     func device(_ device: ICDevice, didCloseSessionWithError error: Error?) {
         guard camera === device else { return }
         ready = false
-        if reconnectAfterClose { reconnectAfterClose = false; device.requestOpenSession(); return }
+        connectionIssue = true
         if busy {
             batchID = UUID(); busy = false; deleting = false; operationProgress = nil; endActivity()
             report += "\nСессия с устройством закрыта: \(error?.localizedDescription ?? "нет соединения")\n"
@@ -349,12 +456,9 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
         detail = error?.localizedDescription ?? "Нажмите «Обновить» для повторного подключения."
     }
     func deviceDidBecomeReady(withCompleteContentCatalog device: ICCameraDevice) {
-        guard camera === device else { return }
-        snapshot(); ready = true
-        status = items.isEmpty ? "На устройстве нет доступных файлов" : "iPhone подключён"
-        detail = "Доступно файлов: \(items.count) · \(Self.size(items.reduce(0) { $0 + $1.bytes }))"
-        // Nothing is preselected: the same selection is used by the delete action.
+        catalogReady(device)
     }
+    func deviceDidBecomeReady(_ device: ICDevice) { if camera === device { pollCatalog() } }
     func cameraDevice(_ camera: ICCameraDevice, didAdd items: [ICCameraItem]) { if self.camera === camera { scheduleSnapshot() } }
     func cameraDevice(_ camera: ICCameraDevice, didRemove items: [ICCameraItem]) { if self.camera === camera { scheduleSnapshot() } }
     func cameraDevice(_ camera: ICCameraDevice, didRenameItems items: [ICCameraItem]) { if self.camera === camera { scheduleSnapshot() } }
@@ -363,6 +467,11 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
     func cameraDevice(_ camera: ICCameraDevice, didReceivePTPEvent eventData: Data) {}
     func cameraDevice(_ camera: ICCameraDevice, didReceiveThumbnail thumbnail: CGImage?, for item: ICCameraItem, error: Error?) {}
     func cameraDevice(_ camera: ICCameraDevice, didReceiveMetadata metadata: [AnyHashable: Any]?, for item: ICCameraItem, error: Error?) {}
-    func cameraDeviceDidRemoveAccessRestriction(_ device: ICDevice) { if camera === device { status = "Чтение медиатеки…"; detail = "Доступ разрешён. Ожидайте список файлов." } }
-    func cameraDeviceDidEnableAccessRestriction(_ device: ICDevice) { if camera === device { ready = false; status = "Разблокируйте iPhone"; detail = "Разрешите доступ к фото и видео на экране телефона." } }
+    func cameraDeviceDidRemoveAccessRestriction(_ device: ICDevice) {
+        guard camera === device else { return }
+        connectionIssue = false; connectionStarted = Date()
+        status = "Чтение медиатеки…"; detail = "Доступ разрешён. Ожидайте список файлов."
+        if !device.hasOpenSession { device.requestOpenSession() } else { pollCatalog() }
+    }
+    func cameraDeviceDidEnableAccessRestriction(_ device: ICDevice) { if camera === device { ready = false; connectionIssue = true; status = "Разблокируйте iPhone"; detail = "Разрешите доступ к фото и видео на экране телефона." } }
 }

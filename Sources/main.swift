@@ -6,6 +6,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let model = DeviceModel()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let bundleID = Bundle.main.bundleIdentifier,
+           let existing = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated }) {
+            existing.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            NSApp.terminate(nil)
+            return
+        }
         NSApp.setActivationPolicy(.regular)
         let menu = NSMenu()
         let appMenuItem = NSMenuItem()
@@ -42,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ])
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard model.busy else { return true }
         _ = applicationShouldTerminate(NSApp)

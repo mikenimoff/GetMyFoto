@@ -2,8 +2,8 @@ import SwiftUI
 import AppKit
 
 enum AppVersion {
-    static var number: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0" }
-    static var build: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1" }
+    static var number: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.1" }
+    static var build: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "2" }
     static var display: String { "\(number) (\(build))" }
 }
 
@@ -165,11 +165,11 @@ struct AppView: View {
                 Spacer(minLength: 10)
                 VStack(spacing: 13) {
                     Image(systemName: "iphone.and.arrow.forward").font(.system(size: 48, weight: .ultraLight)).foregroundStyle(accent)
-                    Text(model.camera == nil ? "Начните с подключения iPhone" : model.ready ? "Нет доступных файлов" : "Ожидаем доступ к медиатеке")
+                    Text(model.camera == nil ? "Начните с подключения iPhone" : model.connectionIssue ? model.status : model.ready ? "Нет доступных файлов" : "Ожидаем доступ к медиатеке")
                         .font(.system(size: 17, weight: .medium))
                     Text("Используйте кабель с передачей данных.\nНа iPhone подтвердите доверие к этому Mac.")
                         .font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                    if model.camera != nil && !model.ready { ProgressView().controlSize(.small) }
+                    if model.camera != nil && !model.ready && !model.connectionIssue { ProgressView().controlSize(.small) }
                 }.padding(25)
                 Spacer(minLength: 20)
             } else if visible.isEmpty {
