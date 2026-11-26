@@ -43,6 +43,7 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
     private var catalogPolledAt = Date.distantPast
     private var lastCatalogCount = -1
     private var restartingBrowser = false
+    private var catalogSummaryVisible = true
     private var history = ImportHistory()
     private var historyError: String?
     private var queue: [MediaItem] = []
@@ -111,9 +112,11 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
     func connect(_ device: ICCameraDevice) {
         guard !busy, camera !== device else { return }
         closeCurrentSession()
+        ThumbnailStore.shared.resetConnection()
         camera = device
         items = []; selected = []; ready = false; connectionIssue = false; knownImported = []
         connectionStarted = Date(); lastCatalogCount = -1
+        catalogSummaryVisible = true
         device.delegate = self
         status = "Подключение к \(Self.displayName(device))…"
         detail = "Разблокируйте iPhone и разрешите доступ к фото и видео."
@@ -130,9 +133,11 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
         // Discard its device references and restart discovery. A healthy session
         // only needs its catalog refreshed, without tearing down a working driver.
         closeCurrentSession()
+        ThumbnailStore.shared.resetConnection()
         camera = nil; devices = []; items = []; selected = []; knownImported = []
         ready = false; connectionIssue = false; connectionStarted = Date()
         status = "Повторный поиск iPhone…"
+        catalogSummaryVisible = true
         detail = "Ищем новое USB-соединение. Оставьте iPhone разблокированным."
         restartingBrowser = true
         browser.stop()
@@ -201,6 +206,10 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
     private func catalogReady(_ device: ICCameraDevice) {
         guard camera === device else { return }
         snapshot(); ready = true; connectionIssue = false; connectionStarted = nil
+        if catalogSummaryVisible && !busy { updateCatalogSummary() }
+    }
+
+    private func updateCatalogSummary() {
         status = items.isEmpty ? "На устройстве нет доступных файлов" : "iPhone подключён"
         detail = "Доступно файлов: \(items.count) · \(Self.size(items.reduce(0) { $0 + $1.bytes }))"
     }
@@ -244,6 +253,7 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
         items = result.sorted { ($0.date ?? .distantPast) == ($1.date ?? .distantPast) ? $0.name < $1.name : ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
         selected.formIntersection(Set(items.map(\.id)))
         reloadHistory()
+        if ready && catalogSummaryVisible && !busy { updateCatalogSummary() }
     }
 
     private func scheduleSnapshot() {
@@ -273,6 +283,7 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
         queue = chosen; index = 0; copied = 0; skipped = 0; failed = 0
         batchRoot = folder; batchByMonth = byMonth; batchSkip = skipImported
         batchID = UUID(); busy = true; deleting = false; stopping = false; fraction = 0
+        catalogSummaryVisible = false
         report = "GetMyFoto \(AppVersion.display) — импорт\n\(Date())\nПапка: \(folder.path)\n\n"
         beginActivity()
         nextFile()
@@ -367,6 +378,7 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
             alert = "Список файлов изменился. Выберите файлы заново."; return
         }
         busy = true; deleting = true; stopping = false; fraction = 0; batchID = UUID()
+        catalogSummaryVisible = false
         let token = batchID
         status = "Удаление с iPhone…"
         detail = "Выбрано файлов: \(reviewed.count). Не отключайте кабель."
@@ -425,6 +437,7 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
     func didRemove(_ device: ICDevice) {
         devices.removeAll { $0 === device }
         guard camera === device else { return }
+        ThumbnailStore.shared.resetConnection()
         batchID = UUID(); busy = false; deleting = false; operationProgress = nil; endActivity()
         camera = nil; items = []; selected = []; ready = false; knownImported = []
         connectionIssue = false; connectionStarted = nil

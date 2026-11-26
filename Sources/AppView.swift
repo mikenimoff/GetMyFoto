@@ -2,8 +2,8 @@ import SwiftUI
 import AppKit
 
 enum AppVersion {
-    static var number: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.1" }
-    static var build: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "2" }
+    static var number: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1.0" }
+    static var build: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "3" }
     static var display: String { "\(number) (\(build))" }
 }
 
@@ -180,8 +180,7 @@ struct AppView: View {
                         Toggle("Выбрать \(item.name)", isOn: Binding(get: { model.selected.contains(item.id) }, set: { value in
                             if value { model.selected.insert(item.id) } else { model.selected.remove(item.id) }
                         })).labelsHidden().toggleStyle(.checkbox).disabled(model.busy || !model.ready)
-                        Image(systemName: item.symbol).font(.system(size: 20)).foregroundStyle(accent)
-                            .frame(width: 36, height: 36).background(accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+                        MediaThumbnail(item: item, enabled: model.ready && !model.busy)
                         VStack(alignment: .leading, spacing: 4) {
                             Text(item.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
                             HStack(spacing: 7) {
