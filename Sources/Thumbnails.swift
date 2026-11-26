@@ -4,8 +4,9 @@ import ImageCaptureCore
 
 /// Main-thread coordinator. Only visible rows enqueue work; decoded images stay
 /// in memory and are never written beside the user's imports or uploaded.
-final class ThumbnailStore {
+final class ThumbnailStore: ObservableObject {
     static let shared = ThumbnailStore()
+    @Published private(set) var revision = 0
     private let cache = NSCache<NSString, NSImage>()
     private struct Request {
         let file: ICCameraFile
@@ -14,7 +15,7 @@ final class ThumbnailStore {
     private var requests: [String: Request] = [:]
     private var waiting: [String] = []
     private var active = Set<String>()
-    private var unavailable = Set<String>()
+    private var unavailable: [String: Date] = [:]
     private var generation = UUID()
 
     private init() {
@@ -26,7 +27,8 @@ final class ThumbnailStore {
 
     func request(_ item: MediaItem, token: UUID, completion: @escaping (NSImage?) -> Void) {
         if let image = cached(item.id) { completion(image); return }
-        guard !unavailable.contains(item.id), item.kind != "Другое" else { completion(nil); return }
+        guard item.kind != "Другое" else { completion(nil); return }
+        if let failedAt = unavailable[item.id], Date().timeIntervalSince(failedAt) < 10 { completion(nil); return }
         if var request = requests[item.id] {
             request.listeners[token] = completion
             requests[item.id] = request
@@ -52,6 +54,7 @@ final class ThumbnailStore {
         let callbacks = requests.values.flatMap { Array($0.listeners.values) }
         requests.removeAll(); waiting.removeAll(); active.removeAll(); unavailable.removeAll()
         for callback in callbacks { callback(nil) }
+        revision += 1
     }
 
     private func pump() {
@@ -65,19 +68,44 @@ final class ThumbnailStore {
             let session = generation
             request.file.requestThumbnailData(options: [.imageSourceThumbnailMaxPixelSize: 160]) { [weak self] data, error in
                 DispatchQueue.main.async {
-                    guard let self, self.generation == session, self.active.remove(key) != nil else { return }
+                    guard let self, self.generation == session, self.active.contains(key) else { return }
                     let image = error == nil ? data.flatMap { NSImage(data: $0) } : nil
                     if let image {
-                        let representation = image.representations.first
-                        let cost = max(1, representation?.pixelsWide ?? 160) * max(1, representation?.pixelsHigh ?? 160) * 4
-                        self.cache.setObject(image, forKey: key as NSString, cost: cost)
-                    } else { self.unavailable.insert(key) }
-                    let callbacks = self.requests.removeValue(forKey: key)?.listeners.values
-                    if let callbacks { for callback in callbacks { callback(image) } }
-                    self.pump()
+                        self.finish(key, image: image)
+                    } else if let thumbnail = request.file.thumbnail {
+                        self.finish(key, image: NSImage(cgImage: thumbnail, size: .zero))
+                        request.file.flushThumbnailCache()
+                    } else {
+                        // Some iOS drivers only provide the embedded thumbnail via
+                        // the delegate API, rather than custom-size thumbnail data.
+                        request.file.requestThumbnail()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+                            guard let self, self.generation == session else { return }
+                            self.finish(key, image: nil)
+                        }
+                    }
                 }
             }
         }
+    }
+
+    func receive(_ thumbnail: CGImage?, for item: ICCameraItem) {
+        guard let entry = requests.first(where: { $0.value.file === item }), active.contains(entry.key) else { return }
+        finish(entry.key, image: thumbnail.map { NSImage(cgImage: $0, size: .zero) })
+        item.flushThumbnailCache()
+    }
+
+    private func finish(_ key: String, image: NSImage?) {
+        guard active.remove(key) != nil else { return }
+        if let image {
+            let representation = image.representations.first
+            let cost = max(1, representation?.pixelsWide ?? 160) * max(1, representation?.pixelsHigh ?? 160) * 4
+            cache.setObject(image, forKey: key as NSString, cost: cost)
+            unavailable.removeValue(forKey: key)
+        } else { unavailable[key] = Date() }
+        let callbacks = requests.removeValue(forKey: key)?.listeners.values
+        if let callbacks { for callback in callbacks { callback(image) } }
+        pump()
     }
 }
 
@@ -87,6 +115,7 @@ struct MediaThumbnail: View {
     @State private var image: NSImage?
     @State private var requestToken: UUID?
     @State private var loading = false
+    @ObservedObject private var store = ThumbnailStore.shared
     private let size: CGFloat = 58
 
     var body: some View {
@@ -110,6 +139,7 @@ struct MediaThumbnail: View {
         .onDisappear { cancel() }
         .onChange(of: enabled) { _ in load() }
         .onChange(of: ObjectIdentifier(item.file)) { _ in load() }
+        .onChange(of: store.revision) { _ in load() }
     }
 
     private func load() {

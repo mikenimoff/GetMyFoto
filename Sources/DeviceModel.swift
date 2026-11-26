@@ -126,6 +126,7 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
     func reconnect() {
         guard !busy else { return }
         if let camera, ready, camera.hasOpenSession, !camera.isAccessRestrictedAppleDevice {
+            ThumbnailStore.shared.resetConnection()
             catalogReady(camera)
             return
         }
@@ -478,7 +479,10 @@ final class DeviceModel: NSObject, ObservableObject, ICDeviceBrowserDelegate, IC
     func cameraDeviceDidChangeCapability(_ camera: ICCameraDevice) { objectWillChange.send() }
     func deviceDidChangeName(_ device: ICDevice) { objectWillChange.send() }
     func cameraDevice(_ camera: ICCameraDevice, didReceivePTPEvent eventData: Data) {}
-    func cameraDevice(_ camera: ICCameraDevice, didReceiveThumbnail thumbnail: CGImage?, for item: ICCameraItem, error: Error?) {}
+    func cameraDevice(_ camera: ICCameraDevice, didReceiveThumbnail thumbnail: CGImage?, for item: ICCameraItem, error: Error?) {
+        guard self.camera === camera else { return }
+        ThumbnailStore.shared.receive(thumbnail, for: item)
+    }
     func cameraDevice(_ camera: ICCameraDevice, didReceiveMetadata metadata: [AnyHashable: Any]?, for item: ICCameraItem, error: Error?) {}
     func cameraDeviceDidRemoveAccessRestriction(_ device: ICDevice) {
         guard camera === device else { return }
