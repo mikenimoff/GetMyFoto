@@ -2,8 +2,8 @@ import SwiftUI
 import AppKit
 
 enum AppVersion {
-    static var number: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1.0" }
-    static var build: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "3" }
+    static var number: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.0" }
+    static var build: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "4" }
     static var display: String { "\(number) (\(build))" }
 }
 
@@ -20,6 +20,11 @@ struct AppView: View {
     @State private var filter = "Все"
     @State private var review: DeleteReview?
     @State private var showReport = false
+    @State private var selectionAnchor: String?
+    @State private var showBatch = false
+    @State private var batchCount = "100"
+    @State private var batchStart = "С начала списка"
+    @State private var addBatch = false
     private let accent = Color(red: 0.12, green: 0.52, blue: 0.41)
 
     private var visible: [MediaItem] {
@@ -44,6 +49,7 @@ struct AppView: View {
         }
         .frame(minWidth: 960, minHeight: 690)
         .tint(accent)
+        .onChange(of: model.camera.map(ObjectIdentifier.init)) { _ in selectionAnchor = nil }
         .sheet(item: $review) { value in DeleteSheet(model: model, review: value) }
         .sheet(isPresented: $showReport) { reportSheet }
         .alert("GetMyFoto", isPresented: Binding(get: { model.alert != nil }, set: { if !$0 { model.alert = nil } })) {
@@ -151,16 +157,24 @@ struct AppView: View {
                 .frame(maxWidth: 220)
             }.padding(.horizontal, 24).padding(.top, 18).padding(.bottom, 12)
             HStack(spacing: 12) {
-                Button(visible.allSatisfy { model.selected.contains($0.id) } && !visible.isEmpty ? "Снять выбор" : "Выбрать все") {
-                    let ids = Set(visible.map(\.id))
-                    if ids.isSubset(of: model.selected) { model.selected.subtract(ids) } else { model.selected.formUnion(ids) }
-                }.disabled(!model.ready || model.busy || visible.isEmpty)
+                Button("Выбрать все") { model.selected.formUnion(visible.map(\.id)) }
+                    .disabled(!model.ready || model.busy || visible.isEmpty)
+                Button("Снять выбор") { model.selected.removeAll() }.disabled(model.busy || model.selected.isEmpty)
+                Button("Выбрать 100…") { showBatch = true }
+                    .disabled(!model.ready || model.busy || visible.isEmpty)
+                    .popover(isPresented: $showBatch, arrowEdge: .bottom) { batchPanel }
                 Button("Только сохранённые") { model.selected = Set(visible.filter { model.knownImported.contains($0.id) }.map(\.id)) }
                     .disabled(!model.ready || model.busy || model.knownImported.isEmpty)
                     .help("Выбрать файлы, скопированные GetMyFoto в текущую папку. Проверяется наличие и размер копии.")
                 Spacer()
                 Text("\(visible.count) файлов").font(.system(size: 11)).foregroundStyle(.secondary)
             }.buttonStyle(.link).font(.system(size: 12)).padding(.horizontal, 24).padding(.bottom, 12)
+            HStack {
+                Text("Мышью — протянуть · Shift — диапазон · ⌘ — отдельные · ⌘A — все")
+                Spacer(minLength: 0)
+                let hidden = model.selected.subtracting(Set(visible.map(\.id))).count
+                if hidden > 0 { Text("Выбрано вне фильтра: \(hidden)") }
+            }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 24).padding(.bottom, 8)
             if model.items.isEmpty {
                 Spacer(minLength: 10)
                 VStack(spacing: 13) {
@@ -175,10 +189,16 @@ struct AppView: View {
             } else if visible.isEmpty {
                 Spacer(); Text("Ничего не найдено").foregroundStyle(.secondary); Spacer()
             } else {
-                List(visible) { item in
+                SelectableMediaList(items: visible, selection: $model.selected, anchor: $selectionAnchor,
+                                    enabled: model.ready && !model.busy) { item in
                     HStack(spacing: 12) {
                         Toggle("Выбрать \(item.name)", isOn: Binding(get: { model.selected.contains(item.id) }, set: { value in
-                            if value { model.selected.insert(item.id) } else { model.selected.remove(item.id) }
+                            if NSEvent.modifierFlags.contains(.shift), let anchor = selectionAnchor {
+                                model.selected.formUnion(MediaSelection.range(ids: visible.map(\.id), from: anchor, through: item.id))
+                            } else {
+                                if value { model.selected.insert(item.id) } else { model.selected.remove(item.id) }
+                                selectionAnchor = item.id
+                            }
                         })).labelsHidden().toggleStyle(.checkbox).disabled(model.busy || !model.ready)
                         MediaThumbnail(item: item, enabled: model.ready && !model.busy)
                         VStack(alignment: .leading, spacing: 4) {
@@ -192,10 +212,59 @@ struct AppView: View {
                         Spacer()
                         Text(DeviceModel.size(item.bytes)).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                     }.padding(.vertical, 3)
-                }.listStyle(.inset).scrollContentBackground(.hidden)
+                }
             }
         }
         .frame(maxHeight: .infinity)
+    }
+
+    private var batchIDs: [String] {
+        let ids = visible.map(\.id)
+        let anchorIndex = selectionAnchor.flatMap { ids.firstIndex(of: $0) }
+        let start: Int
+        switch batchStart {
+        case "С текущего файла": start = anchorIndex ?? 0
+        case "После текущего файла": start = anchorIndex.map { $0 + 1 } ?? 0
+        default: start = 0
+        }
+        return MediaSelection.batch(ids: ids, count: Int(batchCount) ?? 0, startingAt: start)
+    }
+
+    private var batchPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Выбрать пакет файлов").font(.system(size: 17, weight: .semibold))
+            HStack {
+                Text("Количество")
+                Spacer()
+                TextField("100", text: $batchCount).textFieldStyle(.roundedBorder).frame(width: 76)
+            }
+            HStack(spacing: 8) {
+                ForEach([50, 100, 250, 500], id: \.self) { number in
+                    Button(String(number)) { batchCount = String(number) }
+                }
+            }
+            Picker("Откуда", selection: $batchStart) {
+                ForEach(["С начала списка", "С текущего файла", "После текущего файла"], id: \.self) { Text($0) }
+            }
+            Text(selectionAnchor == nil ? "Текущий файл можно задать кликом по строке." : "Текущий файл — последний нажатый или конец предыдущего пакета.")
+                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Toggle("Добавить к выбранным", isOn: $addBatch).toggleStyle(.checkbox)
+            Text("Пакет считается по текущему фильтру и поиску. Для 100 фотографий сначала выберите «Фото».")
+                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Divider()
+            Text(batchIDs.isEmpty ? "Нет файлов для выбора. Проверьте количество и начало пакета." : "Будет выбрано: \(batchIDs.count)\(addBatch ? " (добавить)" : " (заменить текущий выбор)")")
+                .font(.system(size: 12, weight: .medium)).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Отмена") { showBatch = false }.keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Выбрать \(batchIDs.count)") {
+                    let ids = batchIDs
+                    if addBatch { model.selected.formUnion(ids) } else { model.selected = Set(ids) }
+                    selectionAnchor = ids.last
+                    showBatch = false
+                }.buttonStyle(.borderedProminent).disabled(batchIDs.isEmpty || model.busy || !model.ready)
+            }
+        }.padding(20).frame(width: 360)
     }
 
     private var destination: some View {

@@ -49,4 +49,16 @@ check(firstConnection.matches(USBDeviceIdentity(persistentID: "phone", uuid: "ne
 check(firstConnection.matches(USBDeviceIdentity(persistentID: nil, uuid: nil, serial: nil, location: 1)), "replace placeholder using physical USB location")
 check(!firstConnection.matches(USBDeviceIdentity(persistentID: "other", uuid: nil, serial: nil, location: 2)), "keep separate connected phones separate")
 check(!USBDeviceIdentity(persistentID: nil, uuid: nil, serial: nil, location: 0).matches(USBDeviceIdentity(persistentID: nil, uuid: nil, serial: nil, location: 0)), "unknown identifiers never collapse unrelated devices")
+let orderedIDs = (1...250).map { "photo-\($0)" }
+check(MediaSelection.range(ids: orderedIDs, from: "photo-3", through: "photo-102").count == 100, "Shift range includes exactly 100 photos and both endpoints")
+check(MediaSelection.range(ids: orderedIDs, from: "photo-102", through: "photo-3") == MediaSelection.range(ids: orderedIDs, from: "photo-3", through: "photo-102"), "mouse range works upward and downward")
+check(MediaSelection.range(ids: orderedIDs, from: "missing", through: "photo-3").isEmpty, "stale selection anchor cannot select unrelated rows")
+check(MediaSelection.batch(ids: orderedIDs, count: 100, startingAt: 0) == Array(orderedIDs[0..<100]), "first batch selects exactly the requested 100 files")
+check(MediaSelection.batch(ids: orderedIDs, count: 100, startingAt: 100) == Array(orderedIDs[100..<200]), "next batch skips the previous 100 files without overlap")
+check(MediaSelection.batch(ids: orderedIDs, count: 100, startingAt: 200).count == 50, "batch at the end includes only remaining files")
+check(MediaSelection.batch(ids: orderedIDs, count: Int.max, startingAt: 200).count == 50, "very large count cannot overflow the range")
+check(MediaSelection.batch(ids: orderedIDs, count: 0, startingAt: 0).isEmpty, "empty batch cannot select anything")
+check(MediaSelection.batch(ids: orderedIDs, count: 100, startingAt: -1).isEmpty, "invalid batch start cannot wrap around")
+let filteredIDs = ["photo-2", "photo-4", "photo-6"]
+check(MediaSelection.range(ids: filteredIDs, from: "photo-2", through: "photo-6") == Set(filteredIDs), "selection range respects the filtered list")
 print("\(checks) checks passed")
